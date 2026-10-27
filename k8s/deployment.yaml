@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: last-mile-api
@@ -26,7 +26,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: ghcr.io/niks6996/last-mile-devops-pipeline:a686307e35fc913b70bbf3c5aebdab333f96fb9b
+          image: ghcr.io/niks6996/last-mile-devops-pipeline:ebeb25ed4ac816c57fa033c0a27e1a24729d1021
           imagePullPolicy: IfNotPresent
 
           ports:
