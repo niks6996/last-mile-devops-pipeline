@@ -1,0 +1,158 @@
+name: Test alert notification delivery
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  notification-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Prepare alerting configuration
+        run: |
+          mkdir -p /tmp/notification-test
+
+          cat <<'EOF' > /tmp/notification-test/prometheus.yml
+          global:
+            scrape_interval: 5s
+            evaluation_interval: 5s
+
+          rule_files:
+            - /config/alerts.yml
+
+          alerting:
+            alertmanagers:
+              - static_configs:
+                  - targets:
+                      - alertmanager:9093
+
+          scrape_configs:
+            - job_name: last-mile-api
+              static_configs:
+                - targets:
+                    - api:8080
+          EOF
+
+          cat <<'EOF' > /tmp/notification-test/alerts.yml
+          groups:
+            - name: delivery-api
+              rules:
+                - alert: DeliveryAPIDown
+                  expr: up{job="last-mile-api"} == 0
+                  for: 10s
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: "Delivery API is unavailable"
+          EOF
+
+          cat <<'EOF' > /tmp/notification-test/alertmanager.yml
+          route:
+            receiver: test-webhook
+            group_wait: 2s
+            group_interval: 10s
+            repeat_interval: 1h
+
+          receivers:
+            - name: test-webhook
+              webhook_configs:
+                - url: http://receiver:8080/alerts
+                  send_resolved: true
+          EOF
+
+          cat <<'EOF' > /tmp/notification-test/receiver.py
+          import json
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+          class Handler(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  length = int(self.headers.get("Content-Length", "0"))
+                  payload = json.loads(self.rfile.read(length))
+
+                  for alert in payload.get("alerts", []):
+                      name = alert.get("labels", {}).get("alertname")
+                      status = alert.get("status")
+
+                      if name == "DeliveryAPIDown" and status == "firing":
+                          print(
+                              "RECEIVED DeliveryAPIDown status=firing",
+                              flush=True,
+                          )
+
+                  self.send_response(200)
+                  self.end_headers()
+                  self.wfile.write(b"ok")
+
+
+          HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+          EOF
+
+          chmod -R a+rX /tmp/notification-test
+
+      - name: Start receiver, Alertmanager and Prometheus
+        run: |
+          docker network create notification-test
+
+          docker run -d \
+            --name receiver \
+            --network notification-test \
+            -v /tmp/notification-test/receiver.py:/receiver.py:ro \
+            python:3.12-slim \
+            python -u /receiver.py
+
+          docker run -d \
+            --name alertmanager \
+            --network notification-test \
+            -v /tmp/notification-test/alertmanager.yml:/config/alertmanager.yml:ro \
+            ghcr.io/prometheus/alertmanager:v0.34.1 \
+            --config.file=/config/alertmanager.yml \
+            --storage.path=/alertmanager
+
+          docker run -d \
+            --name prometheus-notification-test \
+            --network notification-test \
+            -v /tmp/notification-test:/config:ro \
+            prom/prometheus:v3.15.1 \
+            --config.file=/config/prometheus.yml \
+            --storage.tsdb.path=/prometheus
+
+      - name: Verify webhook receives the firing alert
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..40}; do
+            if docker logs receiver 2>&1 \
+              | grep -q "RECEIVED DeliveryAPIDown status=firing"; then
+
+              docker logs receiver
+              echo "Alert notification delivered to test webhook"
+              exit 0
+            fi
+
+            echo "Waiting for notification: attempt $attempt"
+            sleep 3
+          done
+
+          echo "Notification was not received in time"
+          exit 1
+
+      - name: Show diagnostics if the test fails
+        if: failure()
+        run: |
+          docker ps -a || true
+          docker logs receiver || true
+          docker logs alertmanager || true
+          docker logs prometheus-notification-test || true
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f receiver alertmanager \
+            prometheus-notification-test || true
+          docker network rm notification-test || true
