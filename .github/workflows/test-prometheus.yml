@@ -1,0 +1,221 @@
+name: Test Prometheus monitoring
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  prometheus-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create temporary Kubernetes cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: chart-testing
+
+      - name: Build and load application image
+        run: |
+          docker build -t last-mile-api:monitoring-test .
+          kind load docker-image last-mile-api:monitoring-test \
+            --name chart-testing
+
+      - name: Deploy application
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+
+          kubectl set image deployment/last-mile-api \
+            api=last-mile-api:monitoring-test
+
+          kubectl rollout status deployment/last-mile-api --timeout=180s
+
+      - name: Deploy Prometheus
+        run: |
+          cat <<'EOF' > /tmp/prometheus-test.yaml
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: prometheus-test
+            namespace: default
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: prometheus-pod-reader
+            namespace: default
+          rules:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["get", "list", "watch"]
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: prometheus-pod-reader
+            namespace: default
+          subjects:
+            - kind: ServiceAccount
+              name: prometheus-test
+              namespace: default
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: Role
+            name: prometheus-pod-reader
+          ---
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: prometheus-test-config
+            namespace: default
+          data:
+            prometheus.yml: |
+              global:
+                scrape_interval: 5s
+
+              scrape_configs:
+                - job_name: last-mile-api
+                  kubernetes_sd_configs:
+                    - role: pod
+                      namespaces:
+                        names:
+                          - default
+
+                  relabel_configs:
+                    - source_labels:
+                        - __meta_kubernetes_pod_label_app
+                      action: keep
+                      regex: last-mile-api
+
+                    - source_labels:
+                        - __meta_kubernetes_pod_container_port_name
+                      action: keep
+                      regex: http
+
+                    - source_labels:
+                        - __meta_kubernetes_pod_name
+                      target_label: pod
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: prometheus-test
+            namespace: default
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: prometheus-test
+            template:
+              metadata:
+                labels:
+                  app: prometheus-test
+              spec:
+                serviceAccountName: prometheus-test
+                containers:
+                  - name: prometheus
+                    image: prom/prometheus:v3.15.1
+                    args:
+                      - --config.file=/etc/prometheus/prometheus.yml
+                      - --storage.tsdb.path=/prometheus
+                    ports:
+                      - containerPort: 9090
+                    volumeMounts:
+                      - name: config
+                        mountPath: /etc/prometheus
+                        readOnly: true
+                volumes:
+                  - name: config
+                    configMap:
+                      name: prometheus-test-config
+          EOF
+
+          kubectl apply -f /tmp/prometheus-test.yaml
+          kubectl rollout status deployment/prometheus-test --timeout=180s
+
+      - name: Verify Prometheus scraped both application pods
+        run: |
+          set -euo pipefail
+
+          kubectl port-forward deployment/prometheus-test 19090:9090 \
+            > /tmp/prometheus-port-forward.log 2>&1 &
+          forward_pid=$!
+          trap 'kill "$forward_pid" 2>/dev/null || true' EXIT
+
+          for attempt in {1..30}; do
+            if curl --fail --silent http://localhost:19090/-/ready \
+              > /dev/null; then
+              break
+            fi
+
+            if [ "$attempt" -eq 30 ]; then
+              cat /tmp/prometheus-port-forward.log
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          for attempt in {1..30}; do
+            curl --fail --silent --get \
+              --data-urlencode 'query=up{job="last-mile-api"}' \
+              http://localhost:19090/api/v1/query \
+              > /tmp/prometheus-up.json
+
+            if python3 -c '
+          import json
+
+          with open("/tmp/prometheus-up.json", encoding="utf-8") as file:
+              response = json.load(file)
+
+          results = response.get("data", {}).get("result", [])
+          healthy = [item for item in results if float(item["value"][1]) == 1]
+
+          print(f"Healthy application scrape targets: {len(healthy)}")
+          raise SystemExit(0 if len(healthy) == 2 else 1)
+          '; then
+              break
+            fi
+
+            if [ "$attempt" -eq 30 ]; then
+              cat /tmp/prometheus-up.json
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+          curl --fail --silent --get \
+            --data-urlencode 'query=delivery_api_requests_total{job="last-mile-api"}' \
+            http://localhost:19090/api/v1/query \
+            > /tmp/prometheus-requests.json
+
+          python3 -c '
+          import json
+
+          with open("/tmp/prometheus-requests.json", encoding="utf-8") as file:
+              response = json.load(file)
+
+          results = response.get("data", {}).get("result", [])
+          print("Application request metrics:")
+          print(json.dumps(results, indent=2))
+
+          if response.get("status") != "success" or not results:
+              raise SystemExit("No application request metrics found")
+          '
+
+      - name: Show diagnostics if the test fails
+        if: failure()
+        run: |
+          kubectl get deployments,pods -o wide || true
+          kubectl describe pods -l app=last-mile-api || true
+          kubectl describe pods -l app=prometheus-test || true
+          kubectl logs deployment/prometheus-test || true
+          kubectl get events --sort-by=.lastTimestamp || true
