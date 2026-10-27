@@ -1,0 +1,166 @@
+name: Test rollout availability
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rollout-availability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create temporary Kubernetes cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: chart-testing
+
+      - name: Build and load application images
+        run: |
+          docker build -t last-mile-api:availability-v1 .
+          docker tag last-mile-api:availability-v1 \
+            last-mile-api:availability-v2
+
+          kind load docker-image last-mile-api:availability-v1 \
+            --name chart-testing
+
+          kind load docker-image last-mile-api:availability-v2 \
+            --name chart-testing
+
+      - name: Deploy the first version
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          lines = Path("k8s/deployment.yaml").read_text().splitlines()
+
+          for index, line in enumerate(lines):
+              if line.strip().startswith("image:"):
+                  lines[index] = "          image: last-mile-api:availability-v1"
+                  break
+          else:
+              raise SystemExit("No image found in Deployment")
+
+          Path("/tmp/availability-deployment.yaml").write_text(
+              "\n".join(lines) + "\n"
+          )
+          PY
+
+          kubectl apply -f /tmp/availability-deployment.yaml
+          kubectl apply -f k8s/service.yaml
+
+          kubectl rollout status deployment/last-mile-api --timeout=180s
+
+      - name: Start continuous requests
+        run: |
+          cat <<'EOF' > /tmp/availability-job.yaml
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: availability-test
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: requester
+                    image: python:3.12-slim
+                    command:
+                      - python
+                      - -u
+                      - -c
+                      - |
+                        import time
+                        import urllib.request
+
+                        url = "http://last-mile-api/healthz"
+                        end = time.monotonic() + 120
+                        successes = 0
+                        failures = 0
+
+                        print("Starting continuous requests", flush=True)
+
+                        while time.monotonic() < end:
+                            try:
+                                with urllib.request.urlopen(
+                                    url,
+                                    timeout=2,
+                                ) as response:
+                                    if response.status == 200:
+                                        successes += 1
+                                    else:
+                                        failures += 1
+                            except Exception as error:
+                                failures += 1
+                                print(
+                                    f"Request failed: {error}",
+                                    flush=True,
+                                )
+
+                            time.sleep(1)
+
+                        print(
+                            f"RESULT successful_requests={successes} "
+                            f"failed_requests={failures}",
+                            flush=True,
+                        )
+
+                        if successes == 0 or failures > 0:
+                            raise SystemExit(1)
+          EOF
+
+          kubectl apply -f /tmp/availability-job.yaml
+
+          kubectl wait \
+            --for=condition=Ready \
+            pod \
+            -l job-name=availability-test \
+            --timeout=180s
+
+          echo "Requester is running"
+
+      - name: Roll out the second image tag
+        run: |
+          kubectl set image deployment/last-mile-api \
+            api=last-mile-api:availability-v2
+
+          kubectl rollout status deployment/last-mile-api --timeout=180s
+
+          active=$(kubectl get job availability-test \
+            -o jsonpath='{.status.active}')
+
+          if [ "$active" != "1" ]; then
+            echo "Requester stopped before rollout verification finished"
+            exit 1
+          fi
+
+          echo "Rollout completed while requests were running"
+          kubectl get deployment,pods,service -l app=last-mile-api
+
+      - name: Verify request results
+        run: |
+          if ! kubectl wait \
+            --for=condition=complete \
+            job/availability-test \
+            --timeout=180s; then
+            kubectl logs job/availability-test || true
+            exit 1
+          fi
+
+          kubectl logs job/availability-test
+
+      - name: Show diagnostics if the test fails
+        if: failure()
+        run: |
+          kubectl get deployments,pods,services,jobs -o wide || true
+          kubectl describe deployment last-mile-api || true
+          kubectl describe job availability-test || true
+          kubectl logs job/availability-test || true
+          kubectl get events --sort-by=.lastTimestamp || true
