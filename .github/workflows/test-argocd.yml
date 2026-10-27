@@ -29,6 +29,11 @@ jobs:
           kubectl apply --server-side --force-conflicts -n argocd \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.12/manifests/install.yaml
 
+      - name: Wait for Argo CD components
+        run: |
+          kubectl rollout status deployment/argocd-redis \
+            -n argocd --timeout=180s
+
           kubectl rollout status deployment/argocd-repo-server \
             -n argocd --timeout=300s
 
@@ -94,8 +99,20 @@ jobs:
       - name: Show diagnostics if the test fails
         if: failure()
         run: |
+          echo "=== Argo CD pods ==="
           kubectl get pods -n argocd -o wide || true
+
+          echo "=== Redis pod details and image pull errors ==="
+          kubectl describe pods -n argocd \
+            -l app.kubernetes.io/name=argocd-redis || true
+
+          echo "=== Argo CD namespace events ==="
+          kubectl get events -n argocd \
+            --sort-by=.lastTimestamp || true
+
+          echo "=== Argo CD Application ==="
           kubectl get application last-mile-api -n argocd -o yaml || true
+
+          echo "=== Application resources ==="
           kubectl get deployments,pods,services -o wide || true
           kubectl describe pods -l app=last-mile-api || true
-          kubectl get events --sort-by=.lastTimestamp || true
