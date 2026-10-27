@@ -1,0 +1,239 @@
+name: Test Grafana dashboard
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  grafana-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare monitoring configuration
+        run: |
+          mkdir -p /tmp/monitoring-test/provisioning/datasources
+          mkdir -p /tmp/monitoring-test/provisioning/dashboards
+          mkdir -p /tmp/monitoring-test/dashboards
+
+          cat <<'EOF' > /tmp/monitoring-test/prometheus.yml
+          global:
+            scrape_interval: 5s
+
+          scrape_configs:
+            - job_name: last-mile-api
+              static_configs:
+                - targets:
+                    - api:8080
+          EOF
+
+          cat <<'EOF' > /tmp/monitoring-test/provisioning/datasources/prometheus.yml
+          apiVersion: 1
+
+          datasources:
+            - name: Prometheus
+              uid: prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
+          EOF
+
+          cat <<'EOF' > /tmp/monitoring-test/provisioning/dashboards/provider.yml
+          apiVersion: 1
+
+          providers:
+            - name: delivery-api
+              type: file
+              options:
+                path: /var/lib/grafana/dashboards
+          EOF
+
+          cat <<'EOF' > /tmp/monitoring-test/dashboards/delivery-api.json
+          {
+            "uid": "delivery-api",
+            "title": "Delivery API Overview",
+            "schemaVersion": 39,
+            "version": 1,
+            "refresh": "10s",
+            "panels": [
+              {
+                "id": 1,
+                "title": "API request rate",
+                "type": "timeseries",
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "gridPos": {
+                  "h": 8,
+                  "w": 12,
+                  "x": 0,
+                  "y": 0
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "expr": "sum(rate(delivery_api_requests_total[5m]))"
+                  }
+                ]
+              },
+              {
+                "id": 2,
+                "title": "Requests by route and status",
+                "type": "timeseries",
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "gridPos": {
+                  "h": 8,
+                  "w": 12,
+                  "x": 12,
+                  "y": 0
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "expr": "sum by (route, status) (delivery_api_requests_total)"
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+
+          chmod -R a+rX /tmp/monitoring-test
+
+      - name: Start application, Prometheus and Grafana
+        run: |
+          docker network create monitoring-test
+
+          docker build -t last-mile-api:grafana-test .
+
+          docker run -d \
+            --name api \
+            --network monitoring-test \
+            -p 127.0.0.1:18080:8080 \
+            last-mile-api:grafana-test
+
+          docker run -d \
+            --name prometheus \
+            --network monitoring-test \
+            -v /tmp/monitoring-test/prometheus.yml:/etc/prometheus/prometheus.yml:ro \
+            prom/prometheus:v3.15.1
+
+          docker run -d \
+            --name grafana \
+            --network monitoring-test \
+            -p 127.0.0.1:13000:3000 \
+            -e GF_SECURITY_ADMIN_USER=admin \
+            -e GF_SECURITY_ADMIN_PASSWORD=temporary-test-password \
+            -v /tmp/monitoring-test/provisioning:/etc/grafana/provisioning:ro \
+            -v /tmp/monitoring-test/dashboards:/var/lib/grafana/dashboards:ro \
+            grafana/grafana:13.2.1-ubuntu
+
+      - name: Verify dashboard and Prometheus data
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..30}; do
+            if curl --fail --silent \
+              http://localhost:13000/api/health > /dev/null; then
+              break
+            fi
+
+            if [ "$attempt" -eq 30 ]; then
+              echo "Grafana did not start in time"
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          for attempt in {1..20}; do
+            if curl --fail --silent \
+              http://localhost:18080/healthz > /dev/null; then
+              break
+            fi
+
+            if [ "$attempt" -eq 20 ]; then
+              echo "API did not start in time"
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          curl --fail --silent \
+            http://localhost:18080/deliveries/DEL-1001 > /dev/null
+
+          echo "Checking Grafana dashboard"
+          curl --fail --silent \
+            -u admin:temporary-test-password \
+            http://localhost:13000/api/dashboards/uid/delivery-api \
+            > /tmp/dashboard-response.json
+
+          python3 -c '
+          import json
+
+          with open("/tmp/dashboard-response.json", encoding="utf-8") as file:
+              response = json.load(file)
+
+          dashboard = response["dashboard"]
+          assert dashboard["title"] == "Delivery API Overview"
+          assert len(dashboard["panels"]) == 2
+          print("Dashboard found:", dashboard["title"])
+          print("Panels:", len(dashboard["panels"]))
+          '
+
+          echo "Checking metrics through the Grafana data source"
+          for attempt in {1..30}; do
+            curl --fail --silent --get \
+              -u admin:temporary-test-password \
+              --data-urlencode 'query=delivery_api_requests_total' \
+              http://localhost:13000/api/datasources/proxy/uid/prometheus/api/v1/query \
+              > /tmp/grafana-query.json
+
+            if python3 -c '
+          import json
+
+          with open("/tmp/grafana-query.json", encoding="utf-8") as file:
+              response = json.load(file)
+
+          results = response.get("data", {}).get("result", [])
+          print("Metric series found:", len(results))
+
+          if response.get("status") != "success" or not results:
+              raise SystemExit(1)
+          '; then
+              echo "Grafana successfully queried Prometheus"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Grafana did not receive application metrics in time"
+          cat /tmp/grafana-query.json
+          exit 1
+
+      - name: Show diagnostics if the test fails
+        if: failure()
+        run: |
+          docker ps -a || true
+          docker logs api || true
+          docker logs prometheus || true
+          docker logs grafana || true
+
+      - name: Clean up containers
+        if: always()
+        run: |
+          docker rm -f grafana prometheus api || true
+          docker network rm monitoring-test || true
