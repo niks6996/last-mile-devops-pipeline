@@ -1,16 +1,56 @@
 name: Test API
+
 on:
   push:
   pull_request:
+
 permissions:
   contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m unittest discover -s tests -v
-      - run: docker build -t last-mile-api:test .
+
+      - name: Run API tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build Docker image
+        run: docker build -t last-mile-api:test .
+
+      - name: Start container
+        run: docker run -d --name last-mile-api -p 8080:8080 last-mile-api:test
+
+      - name: Test container endpoints
+        run: |
+          for attempt in {1..10}; do
+            if curl --fail --silent http://localhost:8080/healthz; then
+              echo ""
+              break
+            fi
+
+            if [ "$attempt" -eq 10 ]; then
+              echo "Container did not become healthy"
+              docker logs last-mile-api
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          curl --fail --silent http://localhost:8080/deliveries
+          echo ""
+
+      - name: Show container logs and stop it
+        if: always()
+        run: |
+          docker logs last-mile-api || true
+          docker rm -f last-mile-api || true
