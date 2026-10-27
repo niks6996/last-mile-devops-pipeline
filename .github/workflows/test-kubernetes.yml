@@ -17,13 +17,19 @@ jobs:
 
       - name: Create temporary kind cluster
         uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: chart-testing
 
       - name: Build and load test images
         run: |
           docker build -t last-mile-api:stage8-v1 .
           docker tag last-mile-api:stage8-v1 last-mile-api:stage8-v2
-          kind load docker-image last-mile-api:stage8-v1
-          kind load docker-image last-mile-api:stage8-v2
+
+          kind load docker-image last-mile-api:stage8-v1 \
+            --name chart-testing
+
+          kind load docker-image last-mile-api:stage8-v2 \
+            --name chart-testing
 
       - name: Deploy application
         run: |
@@ -59,28 +65,41 @@ jobs:
         run: |
           set -euo pipefail
 
-          kubectl port-forward service/last-mile-api 18080:80 \
-            > /tmp/port-forward.log 2>&1 &
-          forward_pid=$!
-          trap 'kill "$forward_pid" 2>/dev/null || true' EXIT
+          forward_pid=""
 
-          for attempt in {1..20}; do
-            if curl --fail --silent http://localhost:18080/healthz; then
-              echo ""
-              break
+          stop_forward() {
+            if [ -n "$forward_pid" ]; then
+              kill "$forward_pid" 2>/dev/null || true
+              wait "$forward_pid" 2>/dev/null || true
+              forward_pid=""
             fi
+          }
 
-            if [ "$attempt" -eq 20 ]; then
-              cat /tmp/port-forward.log
-              exit 1
-            fi
+          start_forward() {
+            kubectl port-forward service/last-mile-api 18080:80 \
+              > /tmp/port-forward.log 2>&1 &
+            forward_pid=$!
 
-            sleep 1
-          done
+            for attempt in {1..20}; do
+              if curl --fail --silent http://localhost:18080/healthz; then
+                echo ""
+                return 0
+              fi
 
-          echo "Checking delivery data through the Service"
+              sleep 1
+            done
+
+            cat /tmp/port-forward.log
+            return 1
+          }
+
+          trap stop_forward EXIT
+
+          echo "Checking API through the Service"
+          start_forward
           curl --fail --silent http://localhost:18080/deliveries
           echo ""
+          stop_forward
 
           echo "Rolling out the second image tag"
           kubectl set image deployment/last-mile-api \
@@ -100,8 +119,7 @@ jobs:
           test "$current" = "last-mile-api:stage8-v1"
 
           echo "Checking API after rollback"
-          curl --fail --silent http://localhost:18080/healthz
-          echo ""
+          start_forward
 
           kubectl rollout history deployment/last-mile-api
           kubectl get deployments,pods,services
