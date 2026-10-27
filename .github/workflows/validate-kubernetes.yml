@@ -1,0 +1,23 @@
+name: Validate Kubernetes manifests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate manifests with kubeconform
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/k8s:/manifests:ro" \
+            ghcr.io/yannh/kubeconform:v0.8.0-alpine \
+            -strict -summary -kubernetes-version 1.35.0 /manifests
