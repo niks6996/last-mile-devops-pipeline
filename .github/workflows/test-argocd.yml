@@ -1,0 +1,101 @@
+name: Test Argo CD sync
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  argocd-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create temporary Kubernetes cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: chart-testing
+
+      - name: Install Argo CD
+        run: |
+          kubectl create namespace argocd
+
+          kubectl apply --server-side --force-conflicts -n argocd \
+            -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.12/manifests/install.yaml
+
+          kubectl rollout status deployment/argocd-repo-server \
+            -n argocd --timeout=300s
+
+          kubectl rollout status deployment/argocd-server \
+            -n argocd --timeout=300s
+
+          kubectl rollout status statefulset/argocd-application-controller \
+            -n argocd --timeout=300s
+
+      - name: Create Argo CD application
+        run: |
+          kubectl apply -f argocd/application.yaml
+
+      - name: Wait for sync and health
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..60}; do
+            sync=$(kubectl get application last-mile-api -n argocd \
+              -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
+
+            health=$(kubectl get application last-mile-api -n argocd \
+              -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+
+            echo "Attempt $attempt: sync=$sync health=$health"
+
+            if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
+              echo "Argo CD application is Synced and Healthy"
+              kubectl get application last-mile-api -n argocd
+              kubectl get deployment,pods,service -l app=last-mile-api
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "Application did not become Synced and Healthy in time"
+          exit 1
+
+      - name: Test the deployed API
+        run: |
+          set -euo pipefail
+
+          kubectl port-forward service/last-mile-api 18080:80 \
+            > /tmp/argocd-port-forward.log 2>&1 &
+          forward_pid=$!
+          trap 'kill "$forward_pid" 2>/dev/null || true' EXIT
+
+          for attempt in {1..20}; do
+            if curl --fail --silent http://localhost:18080/healthz; then
+              echo ""
+              curl --fail --silent http://localhost:18080/deliveries
+              echo ""
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          cat /tmp/argocd-port-forward.log
+          exit 1
+
+      - name: Show diagnostics if the test fails
+        if: failure()
+        run: |
+          kubectl get pods -n argocd -o wide || true
+          kubectl get application last-mile-api -n argocd -o yaml || true
+          kubectl get deployments,pods,services -o wide || true
+          kubectl describe pods -l app=last-mile-api || true
+          kubectl get events --sort-by=.lastTimestamp || true
