@@ -194,14 +194,18 @@ jobs:
           '
 
           echo "Checking metrics through the Grafana data source"
-          for attempt in {1..30}; do
-            curl --fail --silent --get \
+          for attempt in {1..40}; do
+            echo "Metrics check: attempt $attempt"
+
+            if curl --fail-with-body --silent --show-error --get \
+              --connect-timeout 5 \
+              --max-time 10 \
               -u admin:temporary-test-password \
               --data-urlencode 'query=delivery_api_requests_total' \
               http://localhost:13000/api/datasources/proxy/uid/prometheus/api/v1/query \
-              > /tmp/grafana-query.json
+              > /tmp/grafana-query.json; then
 
-            if python3 -c '
+              if python3 -c '
           import json
 
           with open("/tmp/grafana-query.json", encoding="utf-8") as file:
@@ -213,15 +217,20 @@ jobs:
           if response.get("status") != "success" or not results:
               raise SystemExit(1)
           '; then
-              echo "Grafana successfully queried Prometheus"
-              exit 0
+                echo "Grafana successfully queried Prometheus"
+                exit 0
+              fi
+            else
+              echo "Query returned an HTTP or connection error; retrying"
+              cat /tmp/grafana-query.json || true
+              echo ""
             fi
 
-            sleep 2
+            sleep 3
           done
 
           echo "Grafana did not receive application metrics in time"
-          cat /tmp/grafana-query.json
+          cat /tmp/grafana-query.json || true
           exit 1
 
       - name: Install screenshot browser
