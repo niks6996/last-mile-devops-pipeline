@@ -10,7 +10,7 @@ permissions:
 jobs:
   grafana-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -223,6 +223,101 @@ jobs:
           echo "Grafana did not receive application metrics in time"
           cat /tmp/grafana-query.json
           exit 1
+
+      - name: Install screenshot browser
+        run: |
+          python3 -m venv /tmp/grafana-browser
+          /tmp/grafana-browser/bin/pip install playwright
+          /tmp/grafana-browser/bin/python -m playwright install --with-deps chromium
+
+      - name: Generate traffic and capture dashboard
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+
+          /tmp/grafana-browser/bin/python - <<'PY'
+          import time
+          import urllib.request
+          from playwright.sync_api import sync_playwright, expect
+
+          print("Generating sample API traffic for two minutes", flush=True)
+
+          for _ in range(120):
+              with urllib.request.urlopen(
+                  "http://localhost:18080/deliveries/DEL-1001",
+                  timeout=5,
+              ) as response:
+                  if response.status != 200:
+                      raise RuntimeError("Sample API request failed")
+              time.sleep(1)
+
+          with sync_playwright() as playwright:
+              browser = playwright.chromium.launch()
+              context = browser.new_context(
+                  viewport={"width": 1600, "height": 1000},
+                  device_scale_factor=1,
+              )
+
+              login = context.request.post(
+                  "http://localhost:13000/login",
+                  data={
+                      "user": "admin",
+                      "password": "temporary-test-password",
+                  },
+              )
+              if not login.ok:
+                  raise RuntimeError(
+                      f"Grafana login failed: HTTP {login.status}"
+                  )
+
+              page = context.new_page()
+
+              try:
+                  page.goto(
+                      "http://localhost:13000/d/delivery-api/"
+                      "delivery-api-overview"
+                      "?orgId=1&from=now-5m&to=now&refresh=10s",
+                      wait_until="domcontentloaded",
+                      timeout=60000,
+                  )
+
+                  expect(
+                      page.get_by_text("API request rate", exact=True)
+                  ).to_be_visible(timeout=60000)
+
+                  expect(
+                      page.get_by_text(
+                          "Requests by route and status",
+                          exact=True,
+                      )
+                  ).to_be_visible(timeout=60000)
+
+                  # Allow the panel queries and chart rendering to finish.
+                  page.wait_for_timeout(15000)
+
+                  page.screenshot(
+                      path="artifacts/grafana-dashboard.png",
+                      full_page=True,
+                  )
+                  print("Saved grafana-dashboard.png", flush=True)
+              except Exception:
+                  page.screenshot(
+                      path="artifacts/grafana-capture-error.png",
+                      full_page=True,
+                  )
+                  raise
+              finally:
+                  browser.close()
+          PY
+
+      - name: Upload Grafana screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grafana-dashboard-evidence
+          path: artifacts/*.png
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Show diagnostics if the test fails
         if: failure()
