@@ -29,6 +29,12 @@ jobs:
           kubectl apply --server-side --force-conflicts -n argocd \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.12/manifests/install.yaml
 
+      - name: Use Docker Hub for the Redis image
+        run: |
+          kubectl set image deployment/argocd-redis \
+            redis=docker.io/library/redis:8.2.3-alpine \
+            -n argocd
+
       - name: Wait for Argo CD components
         run: |
           kubectl rollout status deployment/argocd-redis \
