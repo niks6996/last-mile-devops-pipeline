@@ -9,8 +9,8 @@ application or infrastructure and is not a production service.
 
 ## Verified result
 
-On 30 October 2026, the API was deployed to Amazon EKS in London
-(`eu-west-2`) with two healthy replicas across two worker nodes.
+The API was deployed to Amazon EKS in London (`eu-west-2`) with
+two healthy replicas across two worker nodes.
 
 An in-cluster requester sent delivery lookup requests during a rolling
 restart:
@@ -172,7 +172,7 @@ test verifies a firing notification, not a resolved notification.
 | Application replicas | Two, observed across separate worker nodes |
 | Request test | Delivery lookup through the in-cluster Service |
 | Result | 238 successful requests, 0 failed |
-| Lifecycle | Created, tested and deleted on 30 October 2026 |
+| Lifecycle | Temporary cluster created, tested and deleted after validation |
 
 Infrastructure configuration: [eks/cluster.yaml](eks/cluster.yaml)
 
