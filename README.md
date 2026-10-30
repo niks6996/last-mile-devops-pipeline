@@ -43,29 +43,93 @@ Terraform is not used in this repository's EKS deployment.
 
 ## Deployment architecture
 
+This project separates the manual AWS EKS exercise from the GitOps and
+monitoring tests performed in temporary CI environments.
+
+### Image publishing and EKS deployment
+
 GitHub Actions tests and builds the application image, which is published
 to GitHub Container Registry.
 
-The EKS exercise deploys that image through Kubernetes manifests using
-kubectl. A ClusterIP Service routes requests to two API replicas.
-A separate Kubernetes Job sends requests through the Service while
-the Deployment replaces its pods.
+AWS infrastructure is created separately using eksctl and CloudFormation.
+The operator deploys the application to EKS using kubectl and the
+Kubernetes manifests. GitHub Actions does not automatically deploy to EKS.
 
-Argo CD synchronization and the monitoring stack are tested separately
-in temporary CI environments. They were not installed on this EKS lab.
+```mermaid
+flowchart TD
+    G[GitHub repository] --> CI[GitHub Actions validation and image build]
+    CI --> REG[GitHub Container Registry]
+    O[Operator using local CLI] --> INF[eksctl and CloudFormation]
+    INF --> EKS[Temporary AWS EKS cluster]
+    O --> K[kubectl applies application manifests]
+    K --> EKS
+    REG -->|Worker nodes pull image| APP[API Deployment on EKS]
+    EKS --> APP
+```
 
-## API endpoints
+### EKS rolling-restart availability test
 
-| GET endpoint | Purpose |
-|---|---|
-| `/healthz` | Liveness response |
-| `/readyz` | Readiness response |
-| `/deliveries` | List fictional deliveries |
-| `/deliveries/DEL-1001` | Retrieve one delivery |
-| `/metrics` | Application metrics for Prometheus |
+A Kubernetes Job sends delivery lookup requests through the ClusterIP
+Service while the Deployment replaces its pods.
 
-Readiness currently has no external dependency checks. Delivery records
-are fixed sample data held in memory.
+The tested deployment had two healthy API replicas observed across two
+worker nodes. No public application load balancer was created.
+
+```mermaid
+flowchart TD
+    JOB[In-cluster requester Job] --> SVC[ClusterIP Service]
+    SVC --> P1[API replica on worker node 1]
+    SVC --> P2[API replica on worker node 2]
+    OP[Operator triggers rolling restart] --> DEP[Deployment replaces pods]
+    DEP -.-> P1
+    DEP -.-> P2
+    JOB --> LOG[Saved request results]
+```
+
+The requester was checked as active when the rollout completed.
+
+```text
+RESULT successful_requests=238 failed_requests=0
+```
+
+This demonstrates no failed sampled requests during this specific rolling
+restart of the existing application image. It does not establish
+uninterrupted availability between samples, validate a new application
+release or guarantee zero downtime for future changes.
+
+The temporary EKS environment was deleted after testing.
+
+### Separate CI validation environments
+
+Argo CD synchronization and application health are tested in a temporary
+kind cluster. Prometheus, Grafana and Alertmanager are validated in
+temporary CI environments.
+
+These components were not installed on the EKS lab. The diagrams below
+show separate test relationships, not one shared persistent environment.
+
+```mermaid
+flowchart TD
+    GIT[GitOps configuration in Git] --> ARGO[Argo CD in temporary kind cluster]
+    ARGO --> APP[Application deployment]
+    APP --> CHECK[Sync, health and API checks]
+    CHECK --> OUT[Workflow results]
+```
+
+```mermaid
+flowchart TD
+    API[Application metrics] --> PROM[Prometheus]
+    PROM --> GRAF[Grafana dashboard and query checks]
+    PROM -->|Firing alert| AM[Alertmanager]
+    AM --> WEB[Temporary webhook receiver]
+```
+
+Monitoring tests verify metric collection, dashboard queries,
+DeliveryAPIDown firing and recovery, and delivery of a firing notification
+to the test webhook.
+
+Slack, email and resolved-notification delivery are outside the tested
+notification scope.
 
 ## Run locally
 
