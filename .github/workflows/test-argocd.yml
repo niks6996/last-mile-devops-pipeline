@@ -1,7 +1,11 @@
 name: Test Argo CD sync
 
 on:
+  workflow_dispatch:
   push:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
     branches:
       - main
 

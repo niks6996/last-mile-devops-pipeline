@@ -1,7 +1,11 @@
 name: Test Grafana dashboard
 
 on:
+  workflow_dispatch:
   push:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   pull_request:
 
 permissions:

@@ -1,7 +1,11 @@
 name: Test alert notification delivery
 
 on:
+  workflow_dispatch:
   push:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   pull_request:
 
 permissions:

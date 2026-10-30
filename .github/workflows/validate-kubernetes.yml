@@ -1,7 +1,11 @@
 name: Validate Kubernetes manifests
 
 on:
+  workflow_dispatch:
   push:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   pull_request:
 
 permissions:
