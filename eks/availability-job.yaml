@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: eks-availability-test
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: requester
+          image: python:3.12-slim
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          command:
+            - python
+            - -u
+            - -c
+            - |
+              import time
+              import urllib.request
+              from datetime import datetime, timezone
+
+              url = "http://last-mile-api/deliveries/DEL-1001"
+              successes = 0
+              failures = 0
+              end = time.monotonic() + 120
+
+              print("REQUESTS_STARTED", datetime.now(timezone.utc).isoformat())
+
+              while time.monotonic() < end:
+                  try:
+                      with urllib.request.urlopen(url, timeout=2) as response:
+                          response.read()
+                          if response.status == 200:
+                              successes += 1
+                          else:
+                              failures += 1
+                  except Exception as error:
+                      failures += 1
+                      print("REQUEST_FAILED", str(error), flush=True)
+
+                  time.sleep(0.5)
+
+              print(
+                  f"RESULT successful_requests={successes} "
+                  f"failed_requests={failures}",
+                  flush=True,
+              )
+              raise SystemExit(0 if successes > 0 and failures == 0 else 1)

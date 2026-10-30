@@ -1,129 +1,298 @@
-# Last-Mile DevOps Portfolio: Stage 1
+# Automated Zero-Downtime Deployment for Last-Mile Tracking
 
-A fictional, read-only delivery tracking API built as a personal portfolio demonstration inspired by logistics. It contains sample data only and is not Petrocom's application or infrastructure.
+A personal DevOps portfolio project demonstrating automated testing,
+container publishing, Kubernetes deployment, GitOps validation,
+monitoring and measured availability during rolling pod replacement.
 
-## What works now
+The API uses fictional, read-only delivery data. It is not Petrocom's
+application or infrastructure and is not a production service.
 
-Python standard-library HTTP API, automated API tests, a non-root container image and a GitHub Actions workflow to run tests and build the image. No external packages are needed. The API stores two fixed example records in memory and is not a production service.
+## Verified result
+
+On 30 October 2026, the API was deployed to Amazon EKS in London
+(`eu-west-2`) with two healthy replicas across two worker nodes.
+
+An in-cluster requester sent delivery lookup requests during a rolling
+restart:
+
+```text
+RESULT successful_requests=238 failed_requests=0
+```
+
+The requester was checked as active when the rollout completed.
+
+This demonstrates no failed sampled requests during this specific
+rolling restart. The test used the existing application image.
+It does not prove uninterrupted availability between samples, validate
+a new application release or guarantee zero downtime for future changes.
+
+The temporary EKS cluster was deleted after testing.
+
+## Technology stack
+
+- Python standard-library HTTP API and unit tests
+- Docker and GitHub Container Registry
+- GitHub Actions
+- Kubernetes Deployments, Services and Jobs
+- Argo CD, validated in a temporary kind cluster
+- Prometheus, Grafana and Alertmanager, validated in temporary CI environments
+- Amazon EKS, EC2, VPC and IAM
+- eksctl and AWS CloudFormation for AWS infrastructure
+
+Terraform is not used in this repository's EKS deployment.
+
+## Deployment architecture
+
+GitHub Actions tests and builds the application image, which is published
+to GitHub Container Registry.
+
+The EKS exercise deploys that image through Kubernetes manifests using
+kubectl. A ClusterIP Service routes requests to two API replicas.
+A separate Kubernetes Job sends requests through the Service while
+the Deployment replaces its pods.
+
+Argo CD synchronization and the monitoring stack are tested separately
+in temporary CI environments. They were not installed on this EKS lab.
+
+## API endpoints
 
 | GET endpoint | Purpose |
-| --- | --- |
+|---|---|
 | `/healthz` | Liveness response |
-| `/readyz` | Readiness response (no external dependencies yet) |
+| `/readyz` | Readiness response |
 | `/deliveries` | List fictional deliveries |
-| `/deliveries/DEL-1001` | Get one delivery; unknown IDs return 404 |
+| `/deliveries/DEL-1001` | Retrieve one delivery |
+| `/metrics` | Application metrics for Prometheus |
 
-## Run locally (Python 3.12)
+Readiness currently has no external dependency checks. Delivery records
+are fixed sample data held in memory.
 
-From this folder:
+## Run locally
+
+Use Python 3.12 or a compatible version.
 
 ```powershell
 python -m unittest discover -s tests -v
 python -m app.server
 ```
 
-In a second PowerShell window:
+In another PowerShell window:
 
 ```powershell
 Invoke-RestMethod http://localhost:8080/healthz
-Invoke-RestMethod http://localhost:8080/deliveries
+Invoke-RestMethod http://localhost:8080/readyz
 Invoke-RestMethod http://localhost:8080/deliveries/DEL-1001
 ```
 
-Stop the server with Ctrl+C. Set `$env:PORT = "8081"` before starting it if port 8080 is occupied.
+Stop the server with Ctrl+C. To use another port, set
+`$env:PORT = "8081"` before starting it.
 
 ## Run with Docker
 
-With Docker Desktop running:
+Requires a working Docker installation.
 
 ```powershell
 docker build -t last-mile-api:local .
 docker run --rm -p 8080:8080 last-mile-api:local
 ```
 
-Test with the same PowerShell requests above, then stop with Ctrl+C.
+Docker Desktop is not required for the GitHub Actions tests because
+Docker runs on the hosted runner.
 
-## Planned next stages
+## Kubernetes deployment settings
 
-1. Add Kubernetes manifests with resource limits, health probes and a service.
-2. Add image security scanning and publishing, then GitOps deployment and rollout/rollback tests.
-3. Integrate with the existing EKS platform after reviewing its current configuration and cost implications.
-4. Add application metrics, dashboards and tested alerts.
+The API Deployment uses:
 
-These are plans, not completed features. Do not claim zero downtime until it has been measured during a rollout. No AWS resources are created by this stage.
+- Two replicas
+- RollingUpdate with `maxUnavailable: 0` and `maxSurge: 1`
+- Readiness and liveness probes
+- CPU and memory requests and limits
+- A non-root container with a read-only root filesystem
+- Disabled privilege escalation and dropped Linux capabilities
 
+The Service uses ClusterIP. No public application load balancer was
+created for the EKS exercise.
 
-## Monitoring and deployment validation
+These settings support availability during pod replacement, but runtime
+tests are still required to measure actual behavior.
 
-The project uses GitHub Actions to test the delivery API and its
-supporting deployment and monitoring configuration in temporary
-environments.
+## Automated validation
 
-### Kubernetes and GitOps tests
-
-- Deploy the API into a temporary kind Kubernetes cluster.
-- Verify Argo CD reports the application as Synced and Healthy.
-- Test the deployed API through its Kubernetes Service.
-- Send repeated health-check requests during a rolling update.
-- Fail the availability test if any sampled request fails.
-
-The rollout test uses the same application image with two different
-tags. It validates pod replacement and sampled availability during
-that exercise. It does not validate an application code change or
-guarantee zero downtime for future releases.
-
-### Monitoring tests
-
-- Verify that Prometheus scrapes application metrics.
-- Provision a Grafana Prometheus data source and two-panel dashboard.
-- Verify application metrics through Grafana's data source API.
-- Capture the rendered dashboard as a GitHub Actions artifact.
-- Verify that DeliveryAPIDown fires when the API is unavailable.
-- Verify that the alert clears after the API recovers.
-- Verify firing-alert notification delivery through
-  Prometheus → Alertmanager → a temporary webhook receiver.
-
-The notification test validates delivery to the test webhook.
-Delivery to an operational Slack or email destination has not
-been configured.
-
-### Grafana dashboard
-
-![Delivery API monitoring dashboard](docs/images/grafana-dashboard.png)
-
-The dashboard shows:
-
-- API request rate calculated from the application request counter.
-- Cumulative request counts grouped by route and HTTP status.
-
-### Test workflows
-
-| Workflow file | Purpose |
+| Workflow | Purpose |
 |---|---|
-| `.github/workflows/test-argocd.yml` | Argo CD sync, health and deployed API checks |
-| `.github/workflows/test-grafana.yml` | Grafana provisioning, metric queries and dashboard screenshot |
-| `.github/workflows/test-alerting.yml` | API-down alert firing and recovery |
-| `.github/workflows/test-alert-notification.yml` | Alertmanager firing-alert webhook delivery |
-| `.github/workflows/test-rollout-availability.yml` | Sampled API availability during Kubernetes pod replacement |
+| `test-argocd.yml` | Argo CD synchronization, health and deployed API checks |
+| `test-grafana.yml` | Dashboard provisioning, metric queries and screenshot capture |
+| `test-alerting.yml` | API-down alert firing and recovery |
+| `test-alert-notification.yml` | Alertmanager firing-alert webhook delivery |
+| `test-rollout-availability.yml` | Sampled availability during pod replacement in kind |
 
-Workflow runs and logs are available in the
-[GitHub Actions history](https://github.com/niks6996/last-mile-devops-pipeline/actions).
+The repository also includes API testing, image build/publishing,
+Kubernetes validation and image security scanning.
 
-### Troubleshooting example
+See the [GitHub Actions history](https://github.com/niks6996/last-mile-devops-pipeline/actions)
+for run results.
 
-An Argo CD test failed because its Redis image could not be pulled.
-Pod events showed that Amazon ECR Public returned
-`429 Too Many Requests` with `Data limit exceeded`.
+The kind rollout test uses the same image under two different tags.
+The EKS test uses a rolling restart of the existing image.
 
-The test workflow was updated to pull the Redis image from Docker Hub.
-The subsequent Argo CD test passed.
+## Monitoring and alerting
 
-### Current scope and remaining work
+Prometheus collects application metrics. Grafana provisions a Prometheus
+data source and a two-panel dashboard:
 
-Kubernetes and Argo CD tests run in temporary kind clusters.
-Monitoring tests use temporary containers or clusters in GitHub Actions.
-These environments are removed when the workflows finish.
+- API request rate
+- Cumulative requests grouped by route and HTTP status
 
-AWS EKS integration remains pending. The current results demonstrate
-automated test-environment validation, rather than a persistent
-production deployment.
+![Grafana dashboard](docs/images/grafana-dashboard.png)
+
+Automated tests verify that:
+
+- Grafana can query application metrics through Prometheus.
+- DeliveryAPIDown fires when the API is unavailable.
+- The alert clears when the API recovers.
+- A firing notification reaches a temporary webhook through
+  Prometheus -> Alertmanager -> receiver.
+
+Slack and email notification delivery are not configured. The webhook
+test verifies a firing notification, not a resolved notification.
+
+## AWS EKS practical exercise
+
+| Item | Tested configuration |
+|---|---|
+| Region | London, `eu-west-2` |
+| Kubernetes version | 1.36 |
+| Cluster | `lastmile-lab` |
+| Managed node group | `api-workers` |
+| Worker instances | Two `t3.small` instances |
+| Operating system | Amazon Linux 2023 |
+| Node storage | 20 GiB gp3 per node |
+| Networking | Public worker subnets; NAT Gateway disabled |
+| API endpoint | Public and private access enabled |
+| Application replicas | Two, observed across separate worker nodes |
+| Request test | Delivery lookup through the in-cluster Service |
+| Result | 238 successful requests, 0 failed |
+| Lifecycle | Created, tested and deleted on 30 October 2026 |
+
+Infrastructure configuration: [eks/cluster.yaml](eks/cluster.yaml)
+
+Availability test: [eks/availability-job.yaml](eks/availability-job.yaml)
+
+Saved test output: [availability-result.txt](docs/evidence/eks/availability-result.txt)
+
+### Deployment evidence
+
+![EKS cluster Active](docs/images/04-eks-cluster-active.png)
+
+![Managed node group Active](docs/images/05-nodegroup-active.png)
+
+![Two Kubernetes nodes Ready](docs/images/06-kubernetes-nodes-ready.png)
+
+![API deployment](docs/images/08-api-deployed.png)
+
+![API responses](docs/images/09-api-responses.png)
+
+### Rollout evidence
+
+![Successful rolling restart](docs/images/10-eks-rollout-completed.png)
+
+[Requester-active check](docs/images/10b-requester-active-check.png)
+
+![Availability test result](docs/images/11-eks-availability-result.png)
+
+### Cleanup evidence
+
+![Cluster deletion](docs/images/12-eks-deletion.png)
+
+![Post-deletion checks](docs/images/13-cleanup-verification.png)
+
+Post-deletion checks covered the EKS cluster list, the project VPC,
+non-terminated instances in that VPC and project-tagged EBS volumes.
+The EBS query does not prove the absence of untagged volumes or unrelated
+AWS resources.
+
+## Troubleshooting demonstrated
+
+### EKS node-group launch failure
+
+The initial `t3.medium` node group failed because AWS rejected that
+instance type as ineligible under the account's Free Tier restrictions.
+
+The failure was identified from CloudFormation events. After checking
+eligible types and zone offerings, the failed node-group stack was
+deleted and recreated with `t3.small`, preserving the control plane.
+
+Termination protection on the failed stack had to be disabled before
+deletion.
+
+![Node-group failure reason](docs/images/07-nodegroup-launch-failure.png)
+
+Free Tier eligibility does not guarantee that the complete EKS
+deployment is free.
+
+### Argo CD Redis image pull
+
+An Argo CD CI test failed when Amazon ECR Public returned
+`429 Too Many Requests` while pulling Redis. Switching the test's Redis
+image source to Docker Hub allowed the subsequent test to pass.
+
+### Grafana query retries
+
+A Grafana metric query returned an HTTP error. The retry loop was
+updated so transient curl failures do not immediately terminate the
+step, with response output retained for diagnosis. A subsequent run passed.
+
+## Reproduce the EKS exercise
+
+AWS resources incur charges. Review the configuration, IAM permissions,
+instance eligibility, support status and current pricing first.
+
+Required tools: AWS CLI, compatible kubectl and eksctl.
+
+```powershell
+aws login --profile lastmile-lab --region eu-west-2
+
+$env:AWS_PROFILE = "lastmile-lab"
+$env:AWS_REGION = "eu-west-2"
+
+eksctl create cluster --config-file .\eks\cluster.yaml --dry-run
+eksctl create cluster --config-file .\eks\cluster.yaml --profile lastmile-lab
+
+aws eks update-kubeconfig --name lastmile-lab --profile lastmile-lab --region eu-west-2 --alias lastmile-lab
+
+kubectl --context lastmile-lab apply -f .\k8s\deployment.yaml
+kubectl --context lastmile-lab apply -f .\k8s\service.yaml
+kubectl --context lastmile-lab rollout status deployment/last-mile-api --timeout=180s
+```
+
+Use `eks/availability-job.yaml` to start the requester. Verify its
+`REQUESTS_STARTED` log before triggering a rolling restart. Check that
+the requester remains active when the rollout completes, then inspect
+the Job outcome and request counts.
+
+Do not use a local port-forward as the rollout test traffic path:
+it can disconnect when its selected pod is replaced.
+
+Delete the lab after testing:
+
+```powershell
+eksctl delete cluster --name lastmile-lab --region eu-west-2 --profile lastmile-lab --wait
+```
+
+Verify cleanup independently after deletion. Investigate failed
+CloudFormation stacks rather than repeatedly running creation commands.
+
+## Security and scope
+
+- Fictional sample data only.
+- No AWS credentials or kubeconfig files should be committed.
+- AWS login used a dedicated IAM user with MFA and temporary CLI sessions.
+- Some lab permissions, including EC2 management in London, are broad.
+  This setup does not provide strict project isolation or a
+  production-grade least-privilege IAM design.
+- Public worker subnets and public Kubernetes API access are lab choices.
+- There is no persistent production deployment.
+- No claim is made that GitHub Actions automatically deployed to EKS:
+  the AWS exercise used local CLI commands.
+- New-release deployment, automatic rollback and production load testing
+  remain future improvements.

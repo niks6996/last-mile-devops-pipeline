@@ -1,0 +1,40 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: lastmile-lab
+  region: eu-west-2
+  version: "1.36"
+  tags:
+    Project: last-mile-devops-pipeline
+    Environment: lab
+
+availabilityZones:
+  - eu-west-2a
+  - eu-west-2b
+
+autoModeConfig:
+  enabled: false
+
+vpc:
+  nat:
+    gateway: Disable
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+
+managedNodeGroups:
+  - name: api-workers
+    instanceType: t3.small
+    amiFamily: AmazonLinux2023
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 2
+    volumeSize: 20
+    volumeType: gp3
+    privateNetworking: false
+    ssh:
+      allow: false
+    tags:
+      Project: last-mile-devops-pipeline
+      Environment: lab
